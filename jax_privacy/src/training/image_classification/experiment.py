@@ -271,6 +271,68 @@ class Experiment(experiment.AbstractExperiment):
         """
         return self.update_step < self._max_num_updates
 
+    def prune(self, mask, params):
+        new_params = params
+        for mk, mv in mask.items():
+            if 'softmax' in mk.lower():
+                pv = params[mk]
+                mv = np.transpose(mv, (1, 0))
+                pv['w'] = mv * pv['w']
+                new_params[mk] = pv
+            else:
+                pv = params[mk]
+                mv = np.transpose(mv, (3, 2, 1, 0))
+                pv['w'] = mv * pv['w']
+
+                new_params[mk] = pv
+        return new_params
+
+    # def prune(self, mask: dict, weights: dict) -> dict:
+    #     new_w = {}
+    #     for key, value in weights.items():
+    #         # if 'w' in value.keys():
+    #         #   print(key, value['w'].shape[1:][::-1])
+    #         # else:
+    #         #   print(key, value['scale'].shape[1:][::-1])
+    #         if 'conv' in key.lower():
+    #             for k, v in mask.items():
+    #                 if value['w'].shape[1:][::-1] == v.shape:
+    #                     v = np.transpose(v, (3, 2, 1, 0))
+    #                     value['w'] = value['w'] * v
+    #                     print(1.0 - (np.count_nonzero(value['w']) / value['w'].size))
+    #                     new_w[key] = value
+    #                     del mask[k]
+    #                     break
+    #         elif 'softmax' in key.lower():
+    #             for k, v in mask.items():
+    #                 if value['w'].shape[1:][::-1] == v.shape:
+    #                     v = np.transpose(v, (1, 0))
+    #                     value['w'] = value['w'] * v
+    #                     new_w[key] = value
+    #                     del mask[k]
+    #                     break
+    #         else:
+    #             new_w[key] = value
+    #
+    #     return new_w
+
+    def find_weight_key(self, mask_key):
+        if 'fc' in mask_key:
+            return "wide_res_net/Softmax"
+        else:
+            parts = mask_key.split(".")
+            if len(parts) == 2 and 'conv1' in mask_key.lower():
+                return f"wide_res_net/First_conv"
+            else:
+                a = int(parts[-3][-1])
+                b = int(parts[-2][-1])
+
+                if "conv_shortcut" in mask_key:
+                    return f"wide_res_net/Block_{a}_skip_conv"
+                elif "conv" in mask_key:
+                    c = int(parts[-1][-1])
+                    return f"wide_res_net/Block_{a}Conv_{b}_{c-1}"
+
     def _initialize_train(self):
         """Initializes the data pipeline, the model and the optimizer."""
         self._train_input = utils.py_prefetch(self._build_train_input)
@@ -295,6 +357,19 @@ class Experiment(experiment.AbstractExperiment):
             else:
                 logging.info('Initialized parameters randomly rather than restoring '
                              'from checkpoint.')
+
+            torch_mask = np.load("jax_privacy/pruned_torch_weights.npz")
+            jax_mask = {self.find_weight_key(key): jnp.array(value) for key, value in torch_mask.items()}
+            jax_params = self._params
+            pruned_param = self.prune(jax_mask, jax_params)
+            # for k, v in pruned_param.items():
+            #     print(k, v)
+
+            # for key, value in self._params.items():
+            #     if 'w' in value.keys():
+            #       print(key, value['w'].shape[1:][::-1])
+            #     else:
+            #       print(key, value['scale'].shape[1:][::-1])
 
             self._params_ema = self._params
             self._params_polyak = self._params

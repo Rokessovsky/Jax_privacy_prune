@@ -102,7 +102,7 @@ def get_config(config):
               ),
               data=dict(
                   dataset=data.get_dataset(
-                      name='cifar100',
+                      name='cifar10',
                       train_split='train_valid',  # 'train' or 'train_valid'
                       eval_split='test',  # 'valid' or 'test'
                   ),
