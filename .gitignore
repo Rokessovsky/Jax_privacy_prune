@@ -143,6 +143,6 @@ media
 static
 
 .dill
-datasets/
+jax_privacy/src/training/image_classification/data/datasets/
 
 
