@@ -148,7 +148,7 @@ class Experiment(experiment.AbstractExperiment):
                 rel_val = self.config.optimizer.lr.decay_schedule_kwargs[kwarg_name]
                 abs_val = rel_val * self._max_num_updates
                 self.config.optimizer.lr.decay_schedule_kwargs[kwarg_name] = abs_val
-
+        print("clip norm: ", self.config.training.dp.clipping_norm)
         self.updater = updater.Updater(
             batching=self.batching,
             train_init=train_init,
