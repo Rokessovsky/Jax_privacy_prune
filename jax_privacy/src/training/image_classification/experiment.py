@@ -124,7 +124,7 @@ class Experiment(experiment.AbstractExperiment):
             batch_size_per_device_per_step=cfg_batch_size.per_device_per_step,
             scale_schedule=scale_schedule,
         )
-
+        print("delta: ", self.config.training.dp.target_delta)
         self.accountant = accounting.Accountant(
             clipping_norm=self.config.training.dp.clipping_norm,
             std_relative=self.config.training.dp.noise.std_relative,
@@ -272,21 +272,10 @@ class Experiment(experiment.AbstractExperiment):
         return self.update_step < self._max_num_updates
 
     def prune(self, mask, params):
-        new_params = params
         for mk, mv in mask.items():
-            if 'softmax' in mk.lower():
-                pv = params[mk]
-                mv = np.transpose(mv, (1, 0))
-                pv['w'] = mv * pv['w']
-
-                new_params[mk] = pv
-            else:
-                pv = params[mk]
-                mv = np.transpose(mv, (3, 2, 1, 0))
-                pv['w'] = mv * pv['w']
-
-                new_params[mk] = pv
-        return new_params
+            pv = params[mk].T
+            mv = mv.T
+            self._params[mk]['w'] = np.expand_dims(mv * pv, axis=0)
 
     def find_weight_key(self, mask_key):
         if 'fc' in mask_key:
@@ -332,12 +321,17 @@ class Experiment(experiment.AbstractExperiment):
 
             # loading the mask from dp snip
             torch_mask = np.load("jax_privacy/pruned_torch_weights.npz")
+            torch_params = np.load("jax_privacy/torch_params.npz")
             jax_mask = {self.find_weight_key(key): jnp.array(value) for key, value in torch_mask.items()}
-            jax_params = self._params
+            jax_params = {self.find_weight_key(key): jnp.array(value) for key, value in torch_params.items()}
             # prune the param using the mask from dp snip
-            pruned_param = self.prune(jax_mask, jax_params)
+            self.prune(jax_mask, jax_params)
+            # for k, v in self._params.items():
+            #     if 'conv' in k.lower():
+            #         print(k)
+            #         print(v['w'].shape)
 
-            self._params = pruned_param
+            # self._params = pruned_param
 
             self._params_ema = self._params
             self._params_polyak = self._params
