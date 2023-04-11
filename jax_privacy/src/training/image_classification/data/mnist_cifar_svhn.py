@@ -100,6 +100,8 @@ def build_eval_input_dataset(
       name=dataset.name,
       split=dataset.eval.split_content,
       as_supervised=True,
+      download=False,
+      data_dir=os.path.dirname(os.path.abspath(__file__)) + "/datasets"
   )
   preprocess_fn = functools.partial(
       preprocess_batch,

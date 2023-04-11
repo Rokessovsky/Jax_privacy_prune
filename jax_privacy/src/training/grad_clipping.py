@@ -22,6 +22,7 @@ import jax
 import jax.numpy as jnp
 from jax_privacy.src.training import grad_clipping_utils
 import optax
+import numpy as np
 
 Aux = chex.ArrayTree
 Inputs = chex.ArrayTree
@@ -36,7 +37,34 @@ ClippingFn = Callable[[GradParams], Tuple[GradParams, Aux]]
 GradFn = Callable[[Params, Inputs, ModelState, chex.PRNGKey],
                   Tuple[Tuple[Loss, Aux], Tuple[GradParams, Aux]]]
 LossFn = Callable[[Params, Inputs, ModelState, chex.PRNGKey], Tuple[Loss, Aux]]
+mask = np.load("jax_privacy/pruned_torch_weights.npz")
 
+def find_weight_key(mask_key):
+    if 'fc' in mask_key:
+        return "wide_res_net/Softmax"
+    else:
+        parts = mask_key.split(".")
+        if len(parts) == 2 and 'conv1' in mask_key.lower():
+            return f"wide_res_net/First_conv"
+        else:
+            a = int(parts[-3][-1])
+            b = int(parts[-2][-1])
+
+            if "conv_shortcut" in mask_key:
+                return f"wide_res_net/Block_{a}_skip_conv"
+            elif "conv" in mask_key:
+                c = int(parts[-1][-1])
+                return f"wide_res_net/Block_{a}Conv_{b}_{c-1}"
+
+
+_mask = {find_weight_key(key): jnp.array(value) for key, value in mask.items()}
+
+def prune(grads: dict) -> dict:
+    for mk, mv in _mask.items():
+        pv = grads[mk]
+        pv['w'] = mv.T * pv['w']
+        grads[mk] = pv
+    return grads
 
 def safe_div(
     numerator: chex.Array,
@@ -133,6 +161,9 @@ def _value_and_clipped_grad_single_sample(
     # Compute the gradient.
     out, grad = jax.value_and_grad(forward_fn, has_aux=True)(
         params, inputs_expanded, network_state, rng)
+
+    #TODO: prune here
+    prune(grad)
 
     # Apply the clipping function
     return out, clipping_fn(grad)

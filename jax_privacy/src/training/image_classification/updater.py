@@ -126,8 +126,8 @@ class Updater:
         self._train_init = train_init
         self._forward = forward
 
-        mask = np.load("jax_privacy/pruned_torch_weights.npz")
-        self._mask = {self.find_weight_key(key): jnp.array(value) for key, value in mask.items()}
+        # mask = np.load("jax_privacy/pruned_torch_weights.npz")
+        # self._mask = {self.find_weight_key(key): jnp.array(value) for key, value in mask.items()}
 
         self._clipping_norm = clipping_norm
         self._noise_std_relative = noise_std_relative
@@ -233,29 +233,29 @@ class Updater:
             utils.host_id_devices_for_rng(),
         )
 
-    def find_weight_key(self, mask_key):
-        if 'fc' in mask_key:
-            return "wide_res_net/Softmax"
-        else:
-            parts = mask_key.split(".")
-            if len(parts) == 2 and 'conv1' in mask_key.lower():
-                return f"wide_res_net/First_conv"
-            else:
-                a = int(parts[-3][-1])
-                b = int(parts[-2][-1])
-
-                if "conv_shortcut" in mask_key:
-                    return f"wide_res_net/Block_{a}_skip_conv"
-                elif "conv" in mask_key:
-                    c = int(parts[-1][-1])
-                    return f"wide_res_net/Block_{a}Conv_{b}_{c-1}"
-
-    def prune(self, grads: dict) -> dict:
-        for mk, mv in self._mask.items():
-            pv = grads[mk]
-            pv['w'] = mv.T * pv['w']
-            grads[mk] = pv
-        return grads
+    # def find_weight_key(self, mask_key):
+    #     if 'fc' in mask_key:
+    #         return "wide_res_net/Softmax"
+    #     else:
+    #         parts = mask_key.split(".")
+    #         if len(parts) == 2 and 'conv1' in mask_key.lower():
+    #             return f"wide_res_net/First_conv"
+    #         else:
+    #             a = int(parts[-3][-1])
+    #             b = int(parts[-2][-1])
+    #
+    #             if "conv_shortcut" in mask_key:
+    #                 return f"wide_res_net/Block_{a}_skip_conv"
+    #             elif "conv" in mask_key:
+    #                 c = int(parts[-1][-1])
+    #                 return f"wide_res_net/Block_{a}Conv_{b}_{c-1}"
+    #
+    # def prune(self, grads: dict) -> dict:
+    #     for mk, mv in self._mask.items():
+    #         pv = grads[mk]
+    #         pv['w'] = mv.T * pv['w']
+    #         grads[mk] = pv
+    #     return grads
 
     @functools.partial(jax.pmap, static_broadcasted_argnums=0, axis_name='i')
     def _pmapped_update(
@@ -307,7 +307,7 @@ class Updater:
             (loss, metrics, device_grads), axis_name='i')
 
         # prune the avg_grads with the snip mask
-        avg_grads = self.prune(avg_grads)
+        # avg_grads = self.prune(avg_grads)
         loss_all = jax.lax.all_gather(loss_vector, axis_name='i')
         loss_vector = jnp.reshape(loss_all, [-1])
 
