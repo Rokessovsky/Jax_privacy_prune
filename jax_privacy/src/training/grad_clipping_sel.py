@@ -22,8 +22,8 @@ import jax
 import jax.numpy as jnp
 from jax_privacy.src.training import grad_clipping_utils
 import optax
-import numpy as np
 from jax import random
+import numpy as np
 
 Aux = chex.ArrayTree
 Inputs = chex.ArrayTree
@@ -38,44 +38,9 @@ ClippingFn = Callable[[GradParams], Tuple[GradParams, Aux]]
 GradFn = Callable[[Params, Inputs, ModelState, chex.PRNGKey],
                   Tuple[Tuple[Loss, Aux], Tuple[GradParams, Aux]]]
 LossFn = Callable[[Params, Inputs, ModelState, chex.PRNGKey], Tuple[Loss, Aux]]
-mask = np.load("jax_privacy/pruned_torch_weights.npz")
-
-def find_weight_key(mask_key):
-    if 'softmax' in mask_key.lower():
-        return "wide_res_net/Softmax"
-    else:
-        parts = mask_key.split(".")
-        if len(parts) == 2 and 'first' in mask_key.lower():
-            return f"wide_res_net/First_conv"
-        else:
-            a = int(parts[1][-1])
-            b = int(parts[2])
-
-            if "skip" in mask_key:
-                return f"wide_res_net/Block_{a}_skip_conv"
-            elif "conv" in mask_key:
-                c = int(parts[-1][-1])
-                return f"wide_res_net/Block_{a}Conv_{b}_{c}"
 
 
-_mask = {find_weight_key(key): jnp.array(value) for key, value in mask.items()}
 
-def prune(grads: dict) -> dict:
-    for mk, mv in _mask.items():
-        pv = grads[mk]
-        pv['w'] = mv.T * pv['w']
-        grads[mk] = pv
-    return grads
-
-def prune_rand(grads: dict) -> dict:
-    seed = 0  # You can use any seed value here
-    rng = random.PRNGKey(seed)
-    rngs = random.split(rng, len(grads))
-    for r, key in zip(rngs, grads):
-        if 'w' in grads[key].keys():
-            a = random.bernoulli(r, 0.2, grads[key]['w'].shape)
-            grads[key]['w'] = a * grads[key]['w']
-    return grads
 
 def safe_div(
     numerator: chex.Array,
@@ -144,6 +109,8 @@ def global_clipping(
 def _value_and_clipped_grad_single_sample(
     forward_fn: LossFn,
     clipping_fn: ClippingFn,
+    pruning_rate,
+    pruning_method
 ) -> GradFn:
   """Create a function that computes a clipped gradient for a single sample.
 
@@ -156,6 +123,8 @@ def _value_and_clipped_grad_single_sample(
   Returns:
     Function that computes the gradient for a single sample and clips it.
   """
+
+
 
   def grad_fn(
       params: Params,
@@ -173,9 +142,54 @@ def _value_and_clipped_grad_single_sample(
     out, grad = jax.value_and_grad(forward_fn, has_aux=True)(
         params, inputs_expanded, network_state, rng)
 
-    #TODO: prune here
-    # grad = prune(grad)
-    # grad = prune_rand(grad)
+
+    # for key in grad:
+    #     print("----")
+    #     print(key, grad[key].keys())
+
+    def find_weight_key(mask_key):
+        if 'fc' in mask_key:
+            return "wide_res_net/Softmax"
+        else:
+            parts = mask_key.split(".")
+            if len(parts) == 2 and 'conv1' in mask_key.lower():
+                return f"wide_res_net/First_conv"
+            else:
+                a = int(parts[-3][-1])
+                b = int(parts[-2][-1])
+
+                if "conv_shortcut" in mask_key:
+                    return f"wide_res_net/Block_{a}_skip_conv"
+                elif "conv" in mask_key:
+                    c = int(parts[-1][-1])
+                    return f"wide_res_net/Block_{a}Conv_{b}_{c - 1}"
+
+
+    def prune_adv(grads: dict) -> dict:
+        for mk, mv in _mask.items():
+            pv = grads[mk]
+            print(mk)
+            print(pv['w'].shape)
+            print(mv.shape)
+            pv['w'] = mv.T * pv['w']
+            grads[mk] = pv
+        return grads
+
+    def prune(grads: dict) -> dict:
+        #rng = chex.PRNGKey
+        rngs = random.split(rng, len(grads))
+        for r, key in zip(rngs, grads):
+            if 'w' in grads[key].keys():
+                a = random.bernoulli(r, pruning_rate, grads[key]['w'].shape)
+                grads[key]['w'] = a * grads[key]['w']
+        return grads
+    if pruning_method != "random":
+        mask = np.load(f"jax_privacy/jax_privacy/src/training/masks/pruned_torch_weights_wide-resnet2810_cifar10_{pruning_method}_{pruning_rate}.npz")
+        #mask = np.load(f"jax_privacy/jax_privacy/src/training/masks/pruned_torch_weights_wide-resnet164_cifar10_{pruning_method}_{pruning_rate}.npz")
+        _mask = {find_weight_key(key): jnp.array(value) for key, value in mask.items()}
+        prune_adv(grad)
+    else:
+        prune(grad)
 
     # Apply the clipping function
     return out, clipping_fn(grad)
@@ -256,6 +270,8 @@ def value_and_clipped_grad_loop(
 def value_and_clipped_grad_vectorized(
     forward_fn: LossFn,
     clipping_fn: ClippingFn,
+    pruning_rate: float,
+    pruning_method: float,
 ) -> GradFn:
   """Create a function that computes grads clipped per example using vmapping.
 
@@ -276,6 +292,8 @@ def value_and_clipped_grad_vectorized(
   grad_fn_single_sample = _value_and_clipped_grad_single_sample(
       forward_fn=forward_fn,
       clipping_fn=clipping_fn,
+      pruning_rate=pruning_rate,
+      pruning_method=pruning_method
   )
 
   grad_fn_vectorized = jax.vmap(
@@ -293,6 +311,7 @@ def value_and_clipped_grad_vectorized(
       inputs: Inputs,
       network_state: ModelState,
       rng: chex.PRNGKey,
+      pruning_rate: float
   ) -> Tuple[Tuple[Loss, Aux], Tuple[GradParams, Aux]]:
 
     # Compute vectorized outputs and clipped gradients.

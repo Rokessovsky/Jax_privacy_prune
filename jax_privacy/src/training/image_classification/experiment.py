@@ -41,6 +41,15 @@ import numpy as np
 FLAGS = flags.FLAGS
 
 
+#def _to_scalar(
+#    x: Union[chex.Numeric, chex.Array, chex.ArrayNumpy],
+#) -> chex.Scalar:
+#  """Casts the single-item input to a scalar if it is an array."""
+#  if isinstance(x, (chex.Array, chex.ArrayNumpy)):
+#    return x.item()
+#  else:
+#    return x
+
 def _to_scalar(
         x: Union[chex.Numeric, chex.Array, chex.ArrayNumpy],
 ) -> chex.Scalar:
@@ -50,9 +59,9 @@ def _to_scalar(
     else:
         return x
 
-
 class Experiment(experiment.AbstractExperiment):
     """Jaxline experiment.
+
     This class controls the training and evaluation loop at a high-level.
     """
 
@@ -74,6 +83,7 @@ class Experiment(experiment.AbstractExperiment):
             config: ml_collections.ConfigDict,
     ):
         """Initializes experiment.
+
         Args:
           mode: 'train' or 'eval'.
           init_rng: random number generation key for initialization.
@@ -119,12 +129,15 @@ class Experiment(experiment.AbstractExperiment):
         else:
             scale_schedule = None
 
+        self.old_step=0
+        self.arr=np.zeros((3,3))
+
         self.batching = batching.VirtualBatching(
             batch_size_init=cfg_batch_size.init_value,
             batch_size_per_device_per_step=cfg_batch_size.per_device_per_step,
             scale_schedule=scale_schedule,
         )
-        print("delta: ", self.config.training.dp.target_delta)
+
         self.accountant = accounting.Accountant(
             clipping_norm=self.config.training.dp.clipping_norm,
             std_relative=self.config.training.dp.noise.std_relative,
@@ -148,7 +161,8 @@ class Experiment(experiment.AbstractExperiment):
                 rel_val = self.config.optimizer.lr.decay_schedule_kwargs[kwarg_name]
                 abs_val = rel_val * self._max_num_updates
                 self.config.optimizer.lr.decay_schedule_kwargs[kwarg_name] = abs_val
-        print("clip norm: ", self.config.training.dp.clipping_norm)
+
+        #print("clip norm: ", self.config.training.dp.clipping_norm)
         self.updater = updater.Updater(
             batching=self.batching,
             train_init=train_init,
@@ -167,6 +181,8 @@ class Experiment(experiment.AbstractExperiment):
             log_snr_per_layer=self.config.training.logging.snr_per_layer,
             log_grad_clipping=self.config.training.logging.grad_clipping,
             log_grad_alignment=self.config.training.logging.grad_alignment,
+            pruning_rate=self.config.pruning.pruning_rate,
+            pruning_method=self.config.pruning.pruning_method,
         )
 
     def _compute_epsilon(self, num_updates: chex.Numeric) -> float:
@@ -191,6 +207,7 @@ class Experiment(experiment.AbstractExperiment):
     #  \__|_|  \__,_|_|_| |_|
     #
 
+
     def step(
             self,
             *,
@@ -204,7 +221,7 @@ class Experiment(experiment.AbstractExperiment):
         if self._train_input is None:
             self._initialize_train()
 
-        self._params, self._network_state, self._opt_state, scalars = (
+        self._params, self._network_state, self._opt_state, scalars, grads, unclipped_avg_grads = (
             self.updater.update(
                 params=self._params,
                 network_state=self._network_state,
@@ -212,7 +229,26 @@ class Experiment(experiment.AbstractExperiment):
                 global_step=global_step,
                 inputs=next(self._train_input),
                 rng=rng,
+                #pruning_rate=jnp.broadcast_to(self.config.pruning.pruning_rate, [jax.local_device_count()])
             ))
+
+        # print("\n\nunclipped_avg_grads:")
+        # print(unclipped_avg_grads['wide_res_net/Block_2Conv_3_0']['w'][0][:, :, 0, 0])
+        # print("grads:")
+        # print(grads['wide_res_net/Block_2Conv_3_0']['w'][0][:,:,0,0])
+        # if self.old_step != self.update_step:
+        #     print("done")
+        #     self.arr += grads['wide_res_net/Block_2Conv_3_0']['w'][0][:, :, 0, 0]
+        #     print(self.arr/3.0)
+        #     self.arr = np.zeros((3, 3))
+        # else:
+        #     print("adding")
+        #     self.arr+=grads['wide_res_net/Block_2Conv_3_0']['w'][0][:,:,0,0]
+        # self.old_step=self.update_step
+        # print("params:")
+        # print(self._params['wide_res_net/Block_2Conv_3_0']['w'][0][:,:,0,0])
+        # #print(len(self._params)) #57
+
 
         # Just return the tracking metrics on the first device for logging.
         scalars = utils.get_first(scalars)
@@ -220,9 +256,13 @@ class Experiment(experiment.AbstractExperiment):
 
         # Calculating these scalars at each step leads to a drastic reduction in TPU
         # duty cycle (from 90% to 50%).
+        # print(self.update_step)
+        #print(self._params['wide_res_net/Block_2Conv_3_0']['w'][0][:, :, 0, 0])
         if self.update_step % 100 == 0:
+            # print(self.update_step)
             # Log dp_epsilon (outside the pmapped _update_func method).
             scalars.update(dp_epsilon=self._compute_epsilon(scalars['update_step']))
+            #print(self._params['wide_res_net/Block_2Conv_3_0']['w'][0][:, :, 0, 0])
 
         # Convert arrays to scalars for logging and storing.
         return jax.tree_map(_to_scalar, scalars)
@@ -264,6 +304,7 @@ class Experiment(experiment.AbstractExperiment):
             unused_config: ml_collections.ConfigDict,
     ) -> bool:
         """Returns whether to run the step function, given the current update_step.
+
         We ignore the global_step and config given by jaxline, because model updates
         are not applied at every global_step (due to gradient accumulation to use
         large batch-sizes), so we rather use our own `update_step`, which correctly
@@ -271,11 +312,23 @@ class Experiment(experiment.AbstractExperiment):
         """
         return self.update_step < self._max_num_updates
 
+    # charlie
     def prune(self, mask, params):
+        new_params = params
         for mk, mv in mask.items():
-            pv = params[mk].T
-            mv = mv.T
-            self._params[mk]['w'] = np.expand_dims(mv * pv, axis=0)
+            if 'softmax' in mk.lower():
+                pv = params[mk]
+                mv = np.transpose(mv, (1, 0))
+                pv['w'] = mv * pv['w']
+
+                new_params[mk] = pv
+            else:
+                pv = params[mk]
+                mv = np.transpose(mv, (3, 2, 1, 0))
+                pv['w'] = mv * pv['w']
+
+                new_params[mk] = pv
+        return new_params
 
     def find_weight_key(self, mask_key):
         if 'fc' in mask_key:
@@ -292,7 +345,7 @@ class Experiment(experiment.AbstractExperiment):
                     return f"wide_res_net/Block_{a}_skip_conv"
                 elif "conv" in mask_key:
                     c = int(parts[-1][-1])
-                    return f"wide_res_net/Block_{a}Conv_{b}_{c-1}"
+                    return f"wide_res_net/Block_{a}Conv_{b}_{c - 1}"
 
     def _initialize_train(self):
         """Initializes the data pipeline, the model and the optimizer."""
@@ -314,24 +367,10 @@ class Experiment(experiment.AbstractExperiment):
                     params_init=self._params,
                     network_state_init=self._network_state,
                 )
-                logging.info('Initialized parameters from a checkpoint.')
+                logging.info('Initialized parameters from a checkpoint')
             else:
                 logging.info('Initialized parameters randomly rather than restoring '
                              'from checkpoint.')
-
-            # loading the mask from dp snip
-            torch_mask = np.load("jax_privacy/pruned_torch_weights.npz")
-            torch_params = np.load("jax_privacy/torch_params.npz")
-            jax_mask = {self.find_weight_key(key): jnp.array(value) for key, value in torch_mask.items()}
-            jax_params = {self.find_weight_key(key): jnp.array(value) for key, value in torch_params.items()}
-            # prune the param using the mask from dp snip
-            self.prune(jax_mask, jax_params)
-            # for k, v in self._params.items():
-            #     if 'conv' in k.lower():
-            #         print(k)
-            #         print(v['w'].shape)
-
-            # self._params = pruned_param
 
             self._params_ema = self._params
             self._params_polyak = self._params

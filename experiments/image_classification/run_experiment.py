@@ -32,18 +32,6 @@ import sys
 
 import ctypes
 
-cudnn = ctypes.cdll.LoadLibrary('libcudnn.so')
-version = ctypes.c_int()
-
-cudnn.cudnnGetVersion(ctypes.byref(version))
-print("cuDNN version:", version.value)
-
-
-# Add the parent directory to the Python path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-
-print("JAX version:", jax.__version__)
-print("CUDA version:", jax.lib.xla_bridge.get_backend().platform_version)
 
 if __name__ == '__main__':
   flags.mark_flag_as_required('config')

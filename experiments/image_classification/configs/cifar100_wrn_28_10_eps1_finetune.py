@@ -60,6 +60,10 @@ def get_config(config):
                       layer_to_reset='wide_res_net/Softmax',
                   ),
               ),
+              pruning=dict(
+                  pruning_rate=0.6,
+                  pruning_method='rand'
+              ),
               training=dict(
                   batch_size=dict(
                       init_value=16384,
@@ -71,7 +75,7 @@ def get_config(config):
                   dp=dict(
                       target_delta=1e-5,
                       clipping_norm=1.0,  # float('inf') or None to deactivate
-                      stop_training_at_epsilon=1.0,  # None,
+                      stop_training_at_epsilon=8.0,  # None,
                       rescale_to_unit_norm=True,
                       noise=dict(
                           std_relative=21.1,  # noise multiplier

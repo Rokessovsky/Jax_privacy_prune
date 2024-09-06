@@ -60,10 +60,14 @@ def get_config(config):
                       layer_to_reset=None,
                   ),
               ),
+              pruning=dict(
+                  pruning_rate=0.206,
+                  pruning_method='synflow'
+              ),
               training=dict(
                   batch_size=dict(
                       init_value=4096,
-                      per_device_per_step=64,
+                      per_device_per_step=128,
                       scale_schedule=None,  # example: {'2000': 8, '4000': 16},
                   ),
                   weight_decay=0.0,  # L-2 regularization,
@@ -71,7 +75,7 @@ def get_config(config):
                   dp=dict(
                       target_delta=1e-5,
                       clipping_norm=1.0,  # float('inf') or None to deactivate
-                      stop_training_at_epsilon=1.0,  # None,
+                      stop_training_at_epsilon=8.0,  # None,
                       rescale_to_unit_norm=True,
                       noise=dict(
                           std_relative=10.0,  # noise multiplier

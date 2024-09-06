@@ -14,6 +14,7 @@
 # limitations under the License.
 
 """The updater computes and applies the update.
+
 Typical usage:
   # The updater requires a (haiku) init function, a forward function and a
   # batching instance.
@@ -23,9 +24,12 @@ Typical usage:
         forward=train_forward,  # see `forward.py`
         ...
   )
+
   ...
+
   # Initialize model and optimizer (pmapped).
   params, network_state, opt_state = updater.init(inputs, rng_key)
+
   # Apply update (pmapped).
   params, network_state, opt_state, stats = updater.update(
       params=params,
@@ -45,7 +49,7 @@ import haiku as hk
 import jax
 import jax.numpy as jnp
 from jax_privacy.src.training import batching as batching_module
-from jax_privacy.src.training import grad_clipping
+from jax_privacy.src.training import grad_clipping_sel as grad_clipping
 from jax_privacy.src.training import optim
 from jaxline import utils
 import optax
@@ -80,8 +84,11 @@ class Updater:
             log_snr_per_layer: bool = False,
             log_grad_clipping: bool = False,
             log_grad_alignment: bool = False,
+            pruning_rate: float,
+            pruning_method: float
     ):
         """Initializes the updater.
+
         Args:
           batching: virtual batching that allows to use 'virtual' batches across
             devices and steps.
@@ -126,6 +133,7 @@ class Updater:
         self._train_init = train_init
         self._forward = forward
 
+        # charlie
         # mask = np.load("jax_privacy/pruned_torch_weights.npz")
         # self._mask = {self.find_weight_key(key): jnp.array(value) for key, value in mask.items()}
 
@@ -146,6 +154,11 @@ class Updater:
         self._log_grad_clipping = log_grad_clipping
         self._log_grad_alignment = log_grad_alignment
 
+        self._pruning_rate = pruning_rate
+
+        self.value_and_unclipped_grad = functools.partial(
+            jax.value_and_grad, has_aux=True)
+
         if (clipping_norm in (float('inf'), None) and
                 rescale_to_unit_norm):
             raise ValueError('Cannot rescale to unit norm without clipping.')
@@ -155,6 +168,8 @@ class Updater:
             self.value_and_clipped_grad = functools.partial(
                 jax.value_and_grad, has_aux=True)
         else:
+            # self.value_and_unclipped_grad = functools.partial(
+            #       jax.value_and_grad, has_aux=True)
             self._using_clipped_grads = True
             self.value_and_clipped_grad = functools.partial(
                 grad_clipping.value_and_clipped_grad_vectorized,
@@ -162,6 +177,8 @@ class Updater:
                     clipping_norm=clipping_norm,
                     rescale_to_unit_norm=rescale_to_unit_norm,
                 ),
+                pruning_rate=pruning_rate,
+                pruning_method=pruning_method
             )
 
     def _regularization(self, params: chex.ArrayTree) -> chex.Array:
@@ -218,6 +235,7 @@ class Updater:
             global_step: chex.Array,
             inputs: chex.ArrayTree,
             rng: chex.PRNGKey,
+            #pruning_rate : chex.Array,
     ) -> Tuple[chex.ArrayTree, chex.ArrayTree, chex.ArrayTree, Any]:
         """Perform the pmapped update."""
         # The function below is p-mapped, so arguments must be provided without name
@@ -230,32 +248,34 @@ class Updater:
             global_step,
             inputs,
             rng,
+            #pruning_rate,
             utils.host_id_devices_for_rng(),
         )
+        # charlie
+        def find_weight_key(self, mask_key):
+            if 'fc' in mask_key:
+                return "wide_res_net/Softmax"
+            else:
+                parts = mask_key.split(".")
+                if len(parts) == 2 and 'conv1' in mask_key.lower():
+                    return f"wide_res_net/First_conv"
+                else:
+                    a = int(parts[-3][-1])
+                    b = int(parts[-2][-1])
 
-    # def find_weight_key(self, mask_key):
-    #     if 'fc' in mask_key:
-    #         return "wide_res_net/Softmax"
-    #     else:
-    #         parts = mask_key.split(".")
-    #         if len(parts) == 2 and 'conv1' in mask_key.lower():
-    #             return f"wide_res_net/First_conv"
-    #         else:
-    #             a = int(parts[-3][-1])
-    #             b = int(parts[-2][-1])
-    #
-    #             if "conv_shortcut" in mask_key:
-    #                 return f"wide_res_net/Block_{a}_skip_conv"
-    #             elif "conv" in mask_key:
-    #                 c = int(parts[-1][-1])
-    #                 return f"wide_res_net/Block_{a}Conv_{b}_{c-1}"
-    #
-    # def prune(self, grads: dict) -> dict:
-    #     for mk, mv in self._mask.items():
-    #         pv = grads[mk]
-    #         pv['w'] = mv.T * pv['w']
-    #         grads[mk] = pv
-    #     return grads
+                    if "conv_shortcut" in mask_key:
+                        return f"wide_res_net/Block_{a}_skip_conv"
+                    elif "conv" in mask_key:
+                        c = int(parts[-1][-1])
+                        return f"wide_res_net/Block_{a}Conv_{b}_{c-1}"
+
+        def prune(self, grads: dict) -> dict:
+            for mk, mv in self._mask.items():
+                pv = grads[mk]
+                pv['w'] = mv.T * pv['w']
+                grads[mk] = pv
+            return grads
+
 
     @functools.partial(jax.pmap, static_broadcasted_argnums=0, axis_name='i')
     def _pmapped_update(
@@ -266,7 +286,9 @@ class Updater:
             global_step: chex.Array,
             inputs: chex.ArrayTree,
             rng: chex.PRNGKey,
+            #pruning_rate: chex.Array,
             host_id: Optional[chex.Array],
+
     ) -> Tuple[chex.ArrayTree, chex.ArrayTree, chex.ArrayTree, Any]:
         """Updates parameters."""
         # Note on rngs:
@@ -294,8 +316,12 @@ class Updater:
         # trainable parameters only).
         forward = functools.partial(self._forward, frozen_params=frozen_params)
         (loss, (network_state, metrics,
-                loss_vector)), device_grads = self.value_and_clipped_grad(forward)(
+                loss_vector)), unclipped_device_grads = self.value_and_unclipped_grad(forward)(
             params, inputs, network_state, rng_device)
+
+        (loss, (network_state, metrics,
+                loss_vector)), device_grads = self.value_and_clipped_grad(forward)(
+            params, inputs, network_state, rng_device, self._pruning_rate)
 
         if self._using_clipped_grads:
             device_grads, grad_norms_per_sample = device_grads
@@ -306,8 +332,18 @@ class Updater:
         loss, metrics, avg_grads = jax.lax.pmean(
             (loss, metrics, device_grads), axis_name='i')
 
-        # prune the avg_grads with the snip mask
+        loss, metrics, unclipped_avg_grads = jax.lax.pmean(
+            (loss, metrics, unclipped_device_grads), axis_name='i')
+
+
+        # with jax.disable_jit():
+        #     print(avg_grads)
+        # print(avg_grads.keys())
+
+        # charlie
+        ## prune the avg_grads with the snip mask
         # avg_grads = self.prune(avg_grads)
+
         loss_all = jax.lax.all_gather(loss_vector, axis_name='i')
         loss_vector = jnp.reshape(loss_all, [-1])
 
@@ -328,6 +364,7 @@ class Updater:
             grads=jax.tree_map(jnp.zeros_like, avg_grads),
             rng_key=rng_common,
         )
+
         # Compute our 'final' gradients `grads`: these comprise the clipped
         # data-dependent gradients (`avg_grads`), the regularization gradients
         # (`reg_grads`) and the noise to be added to achieved differential privacy
@@ -338,6 +375,7 @@ class Updater:
             reg_grads,
             noise,
         )
+        #print(grads)
 
         # Compute the learning-rate according to its schedule. Note that the
         # schedule evolves with `update_step` rather than `global_step` since the
@@ -349,6 +387,7 @@ class Updater:
             decay_schedule_name=self._lr_decay_schedule_name,
             decay_schedule_kwargs=self._lr_decay_schedule_kwargs,
         )
+
         # Create an optimizer that will only apply the update every
         # `k=self.batching.apply_update_every` steps, and accumulate gradients
         # in-between so that we can use a large 'virtual' batch-size.
@@ -404,7 +443,9 @@ class Updater:
         # Merge the updated parameters with the parameters that are supposed to
         # remain frozen during training.
         new_params = hk.data_structures.merge(new_params, frozen_params)
-        return new_params, network_state, opt_state, scalars
+
+        #print(new_params)
+        return new_params, network_state, opt_state, scalars, grads, unclipped_avg_grads
 
     def _compute_grad_alignment(
             self,
